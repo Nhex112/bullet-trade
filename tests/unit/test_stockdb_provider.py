@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from datetime import date as Date
 
 import pandas as pd
@@ -28,6 +29,7 @@ class FakeRD:
         self._minute = {k: list(v) for k, v in (minute or {}).items()}
         self._factors = {k: list(v) for k, v in (factors or {}).items()}
         self._codes = codes or {}
+        self.last_kwargs: dict | None = None
 
     # ---------- 内部工具 ----------
     def _factor_pairs(self, code: str):
@@ -55,6 +57,14 @@ class FakeRD:
         as_df=False,
     ):
         _ = fq, as_df
+        self.last_kwargs = {
+            "code": code,
+            "start": start,
+            "end": end,
+            "frequency": frequency,
+            "limit": limit,
+            "desc": desc,
+        }
         code = str(code)
         if str(frequency) in ("1m", "5m", "15m", "30m", "60m"):
             records = list(self._minute.get(code, []))
@@ -512,11 +522,66 @@ def test_get_bars_wraps_get_price() -> None:
         }
     )
     provider = _provider(rd)
-    frame = provider.get_bars("600519.XSHG", count=2, unit="1d", df=True)
+    frame = provider.get_bars(
+        "600519.XSHG", count=2, unit="1d", df=True, end_dt="2026-06-24"
+    )
     assert len(frame) == 2
     assert frame["close"].tolist() == [101.0, 102.0]
-    raw = provider.get_bars("600519.XSHG", count=2, unit="1d", df=False)
+    raw = provider.get_bars(
+        "600519.XSHG", count=2, unit="1d", df=False, end_dt="2026-06-24"
+    )
     assert isinstance(raw, dict)
+
+
+def test_get_price_count_uses_bounded_window() -> None:
+    rows = []
+    day = datetime.date(2023, 6, 1)
+    while day <= datetime.date(2024, 6, 30):
+        if day.weekday() < 5:
+            rows.append(_daily_row(int(day.strftime("%Y%m%d")), 10.0, code="600519"))
+        day += datetime.timedelta(days=1)
+    rd = FakeRD(daily={"600519": rows})
+    provider = _provider(rd)
+    df = provider.get_price(
+        "600519.XSHG",
+        end_date="2024-06-01",
+        count=5,
+        fields=["close"],
+        fq="none",
+    )
+    assert len(df) == 5
+    assert rd.last_kwargs is not None
+    assert rd.last_kwargs["start"] != "19900101"
+    assert rd.last_kwargs["desc"] is True
+    assert rd.last_kwargs["limit"] == 5
+    # 返回 end 之前最新 5 个交易日
+    assert df.index[-1].strftime("%Y%m%d") == "20240531"
+    assert df.index[0].strftime("%Y%m%d") == "20240527"
+
+
+def test_get_price_minute_count_uses_bounded_window() -> None:
+    rd = FakeRD(
+        minute={
+            "600633": [
+                {"date": 20260625093500, "code": "600633", "open": 10.0, "high": 10.1,
+                 "low": 9.9, "close": 10.05, "volume": 100, "amount": 1005},
+                {"date": 20260625094000, "code": "600633", "open": 10.05, "high": 10.2,
+                 "low": 10.0, "close": 10.15, "volume": 200, "amount": 2030},
+            ]
+        }
+    )
+    provider = _provider(rd)
+    provider.get_price(
+        "600633.XSHG",
+        end_date="2026-06-25 09:40:00",
+        count=1,
+        frequency="minute",
+        fields=["close"],
+        fq="none",
+    )
+    assert rd.last_kwargs is not None
+    assert rd.last_kwargs["start"] != "19900101"
+    assert rd.last_kwargs["start"].endswith("000000")
 
 
 def test_unsupported_extensions_raise() -> None:

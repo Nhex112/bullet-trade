@@ -101,6 +101,8 @@ class StockDBProvider(DataProvider):
         self._sdk: Optional[Any] = self.config.get("sdk_module")
         self._proc: Optional[subprocess.Popen] = None
         self._factor_cache: Dict[str, Dict[int, float]] = {}
+        self._calendar_cache: Optional[List[datetime]] = None
+        self._security_rows_cache: Optional[List[Dict[str, Any]]] = None
         cache_dir = self.config.get("cache_dir")
         use_env_cache = "cache_dir" not in self.config
         try:
@@ -527,6 +529,40 @@ class StockDBProvider(DataProvider):
             records = list(reversed(records))
         return records
 
+    @staticmethod
+    def _bounded_start_for_count(
+        end_q: Optional[str], frequency: str, count: Optional[int]
+    ) -> Optional[str]:
+        """count 查询改为有界窗口，避免 SDK 对全历史倒序扫描（约 250ms/次）。
+
+        stockdb 的 desc+limit 查询在 LevelDB 上会先做整段反向扫描再截断；
+        按频率与 count 反推一个足够宽的起始日期，可将单次查询降到毫秒级。
+        """
+        if end_q is None or count is None:
+            return None
+        try:
+            end_ts = pd.to_datetime(str(end_q)[:8], format="%Y%m%d")
+        except (ValueError, TypeError):
+            return None
+        if pd.isna(end_ts):
+            return None
+        n = max(int(count), 1)
+        if frequency in ("1m", "5m", "15m", "30m", "60m"):
+            buffer_days = 45
+        elif frequency == "1w":
+            buffer_days = max(n * 8 + 12, 30)
+        elif frequency == "1M":
+            buffer_days = max(n * 32 + 12, 60)
+        else:
+            buffer_days = max(n * 3 + 10, 15)
+        start_ts = end_ts - pd.Timedelta(days=buffer_days)
+        if start_ts.year < 1990:
+            start_ts = pd.Timestamp("1990-01-01")
+        base = start_ts.strftime("%Y%m%d")
+        if frequency in ("1m", "5m", "15m", "30m", "60m") and len(str(end_q)) == 14:
+            return base + "000000"
+        return base
+
     def get_price(
         self,
         security: Union[str, List[str]],
@@ -566,7 +602,9 @@ class StockDBProvider(DataProvider):
         if end_q is None:
             end_q = datetime.now().strftime("%Y%m%d")
         if count is not None:
-            start_q = "19900101"
+            start_q = self._bounded_start_for_count(end_q, frequency_norm, count)
+            if start_q is None:
+                start_q = "19900101"
         elif start_q is None:
             start_q = _DEFAULT_START
 
@@ -755,17 +793,22 @@ class StockDBProvider(DataProvider):
         return sorted(pd.to_datetime(str(d), format="%Y%m%d") for d in dates)
 
     def _load_calendar(self) -> List[datetime]:
+        if self._calendar_cache is not None:
+            return self._calendar_cache
         if self._cache is not None:
             try:
-                return self._cache.cached_call(
+                days = self._cache.cached_call(
                     "get_trade_days",
                     {"start_date": None, "end_date": None, "count": None},
                     lambda kwargs: self._fetch_calendar(),
                     result_type="list_date",
                 )
             except Exception:
-                pass
-        return self._fetch_calendar()
+                days = self._fetch_calendar()
+        else:
+            days = self._fetch_calendar()
+        self._calendar_cache = list(days)
+        return self._calendar_cache
 
     def get_trade_days(
         self,
@@ -842,17 +885,22 @@ class StockDBProvider(DataProvider):
         return rows
 
     def _load_security_rows(self) -> List[Dict[str, Any]]:
+        if self._security_rows_cache is not None:
+            return self._security_rows_cache
         if self._cache is not None:
             try:
-                return self._cache.cached_call(
+                rows = self._cache.cached_call(
                     "get_all_securities",
                     {"types": "all", "date": None},
                     lambda kwargs: self._fetch_security_rows(),
                     result_type="list_dict",
                 )
             except Exception:
-                pass
-        return self._fetch_security_rows()
+                rows = self._fetch_security_rows()
+        else:
+            rows = self._fetch_security_rows()
+        self._security_rows_cache = list(rows)
+        return self._security_rows_cache
 
     def get_all_securities(
         self,
