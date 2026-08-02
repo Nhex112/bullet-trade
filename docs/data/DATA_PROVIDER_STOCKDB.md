@@ -59,6 +59,16 @@ STOCKDB_TIMEOUT=15         # 服务就绪轮询超时（秒）
 - 停牌日不写入 K 线记录，行情序列不包含停牌日空行（与 `fill_paused` 语义不同）。
 - 首次 `auth()` 需导入 SDK 并预热复权因子，可能耗时数秒到数十秒（一次性，之后走磁盘缓存）。
 - 价格精度：股票 2 位小数，`1`/`5` 开头基金/ETF 3 位小数。
+- 分钟线覆盖不完整（实测部分历史日期有 1m 数据、部分没有）；日频回测中引擎的 count=1 当前行情探测会自动回退到当日日线近似（`STOCKDB_MINUTE_DAILY_FALLBACK=false` 可关闭），分钟级取数（count>1）在无数据区间返回空。
+
+## 性能建议
+
+回测建议开启数据会话与行情块预取（多标的/长区间回测可显著减少逐日查询，实测 1 年回测引擎耗时下降约 37%）：
+
+```env
+BT_BACKTEST_DATA_SESSION=true
+BT_BACKTEST_DATA_SESSION_PRICE_BLOCKS=true
+```
 
 ## 验收状态
 
