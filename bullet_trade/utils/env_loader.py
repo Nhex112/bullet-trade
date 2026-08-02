@@ -201,6 +201,15 @@ def get_data_provider_config() -> dict:
             "use_stub": get_env_bool("EASY_TDX_USE_STUB", False),
             "cache_dir": cache_dir_for("easy_tdx"),
         },
+        "stockdb": {
+            "host": get_env("STOCKDB_HOST", "127.0.0.1"),
+            "port": get_env_int("STOCKDB_PORT", 7899),
+            "sdk_dir": get_env("STOCKDB_SDK_DIR"),
+            "auto_start": get_env_bool("STOCKDB_AUTO_START", True),
+            "exe": get_env("STOCKDB_EXE"),
+            "timeout": get_env_float("STOCKDB_TIMEOUT", 15.0),
+            "cache_dir": cache_dir_for("stockdb"),
+        },
     }
 
 

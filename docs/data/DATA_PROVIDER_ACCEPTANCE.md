@@ -94,6 +94,24 @@
 | `get_current_tick` / `get_live_current` | 实时 quote | online smoke | PASS | 能返回最新价、涨跌停、停牌状态字段 | 实时值不和历史回放做强一致 |
 | 扩展接口 | 财务、行业、概念、融资融券等 | 无 | UNSUPPORTED | 未作为 easy_tdx online Beta 能力 | 保持 `NotImplementedError` 或不暴露支持 |
 
+
+## StockDB 打样结果
+
+以下是 2026-08-02 本机真实数据验收样例（stockdb 本地服务 + Python 3.12 + bullet-trade 源码跑回测）：
+
+| 函数 | 场景 | 基准 | 状态 | 结果摘要 | 兼容尝试/说明 |
+| --- | --- | --- | --- | --- | --- |
+| `auth` | 自动拉起 + 健康检查 | 本地服务 | PASS | 服务未运行时自动启动 stockdb.exe 并轮询 7899 端口 | 可用 STOCKDB_AUTO_START=false 关闭 |
+| `get_price` | 日线未复权长窗口 | JQData | PARTIAL | 本地数据自洽：000001.XSHE/600519.XSHG/510050.XSHG 日线正常返回；与 JQData 数值对账因账号权限未执行 | 单元测试覆盖 panel/长表/字段映射 |
+| `get_price` | 1m/5m 分钟线 | 本地数据 | PASS | 日内 14 位时间戳对齐，数据形态与 SDK 一致 | 分钟线长历史以本地同步为准 |
+| `get_price(fq="pre")` | 日线前复权 | JQData | PARTIAL | 复权因子在内存计算，跨除权日样例闭环正确；对账待补 | 与 SDK 前复权公式一致（raw * cum / cum_latest） |
+| `pre_factor_ref_date` | 动态前复权日线 | JQData | PARTIAL | 以参考日因子锚定，样例计算正确 | 无复权因子且显式要求参考日时报 NotImplementedError |
+| `get_trade_days` | 交易日历 | JQData | PARTIAL | 锚点并集日历与回测 81 个交易日一致；与 JQData 集合对账待补 | 支持 start/end/count，经 CacheManager 缓存 |
+| `get_all_securities` | 证券列表 | schema/smoke | PARTIAL | 本地返回 7251 只（股票/ETF/基金），代码格式与聚宽一致 | 名称取自最新交易日快照，停牌标的回退为代码 |
+| `get_security_info` | 单标的信息 | heuristic/unit | PASS | 600519.XSHG/上证50ETF/920000.XBJG 名称与类型识别正确 | 按代码段推断市场与类型 |
+| `get_split_dividend` | 除权除息事件 | 复权闭环/回测 | PARTIAL | 由复权表 div/give/trans 解析；回测中 510300.XSHG 现金分红已正确入账 | div按每股、give/trans 按每 10 股约定，待与 JQData 事件表逐条对账 |
+| 扩展接口 | 财务/指数/板块/tick 等 | 无 | UNSUPPORTED | 保持 `NotImplementedError`，不伪造数据 | 要求明确返回空表或抛错 |
+| 基准下降 | 指数基准 000300.XSHG | 现有 analysis | PASS | 基准数据空时回测与报告正常生成，基准指标降级为 0 | 不影响策略交易 |
 ## RQData 打样状态
 
 RQData 当前完成 mock 合同测试，但缺真实账号，因此真实验收报告必须标为 BLOCKED：

@@ -55,6 +55,8 @@ def _normalize_provider_name(name: Optional[str]) -> str:
         return "rqdata"
     if lowered in ("tdx", "easytdx", "easy_tdx", "easy-tdx"):
         return "easy_tdx"
+    if lowered in ("stockdb", "stock_db"):
+        return "stockdb"
     return lowered
 
 
@@ -104,6 +106,12 @@ def _create_provider(
         provider_cfg = dict(config.get("easy_tdx", {}) or {})
         provider_cfg.update(overrides)
         return EasyTdxProvider(provider_cfg)
+    if target == "stockdb":
+        from .providers.stockdb import StockDBProvider
+
+        provider_cfg = dict(config.get("stockdb", {}) or {})
+        provider_cfg.update(overrides)
+        return StockDBProvider(provider_cfg)
 
     raise ValueError(f"未知的数据提供者: {provider_name}")
 
@@ -219,6 +227,17 @@ def _sdk_fallback_targets(
             except Exception as exc:
                 errors.append(f"easy_tdx MacClient 初始化失败: {exc}")
         candidate = _get_from(client, "easy_tdx.MacClient")
+        if candidate:
+            return candidate
+    elif normalized == "stockdb":
+        rd = None
+        ensure_rd = getattr(provider, "_ensure_rd", None)
+        if callable(ensure_rd):
+            try:
+                rd = ensure_rd()
+            except Exception as exc:
+                errors.append(f"stockdb rd 客户端初始化失败: {exc}")
+        candidate = _get_from(rd, "stockdb.rd")
         if candidate:
             return candidate
 
