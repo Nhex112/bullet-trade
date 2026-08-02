@@ -61,6 +61,11 @@ STOCKDB_TIMEOUT=15         # 服务就绪轮询超时（秒）
 - 价格精度：股票 2 位小数，`1`/`5` 开头基金/ETF 3 位小数。
 - 分钟线覆盖不完整（实测部分历史日期有 1m 数据、部分没有）；日频回测中引擎的 count=1 当前行情探测会自动回退到当日日线近似（`STOCKDB_MINUTE_DAILY_FALLBACK=false` 可关闭），分钟级取数（count>1）在无数据区间返回空。
 
+## 客户端与自愈
+
+- 默认使用轻量客户端（`STOCKDB_USE_LIGHT_CLIENT=true`）：直接基于底层 pyd，绕开 stock_sdk 导入时的复权因子全表预加载，冷启动从约 300ms 降至约 8ms；查询输出与 stock_sdk 逐项对照一致。可用 `STOCKDB_USE_LIGHT_CLIENT=false` 回退。
+- 默认开启健康自愈（`STOCKDB_AUTO_HEAL=true`，阈值 `STOCKDB_HEAL_THRESHOLD=3`）：连续 3 次查询失败（约 46 秒）后自动终止旧进程、重新拉起 stockdb.exe 并重建连接，实测服务进程被杀后自动恢复且数据一致。
+
 ## 性能建议
 
 回测建议开启数据会话与行情块预取（多标的/长区间回测可显著减少逐日查询，实测 1 年回测引擎耗时下降约 37%）：

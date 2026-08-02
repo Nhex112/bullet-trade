@@ -131,9 +131,61 @@ class FakeRD:
                 for record in self._all_daily_records()
                 if int(str(record["date"])[:8]) == day
             ]
+        if table == _TABLE_DAILY and str(code) != "*":
+            q = str(query or "")
+            records = [dict(r) for r in self._daily.get(str(code), [])]
+            if ">" in q:
+                start, end = q.split(">", 1)
+                return [
+                    r for r in records
+                    if int(r["date"]) >= int(start) and int(r["date"]) <= int(end)
+                ]
+            if "<" in q:
+                start, end = q.split("<", 1)
+                return [
+                    r for r in records
+                    if int(r["date"]) >= int(start) and int(r["date"]) <= int(end)
+                ][::-1]
+            if q.endswith("*"):
+                prefix = q[:-1]
+                return [r for r in records if str(r["date"]).startswith(prefix)]
+            if q and q != "*":
+                day = int(q[:8])
+                return [r for r in records if int(r["date"]) == day]
+            return records
         if table == _TABLE_FACTOR and str(code) != "*":
             return [dict(rec) for _, rec in self._factor_pairs(str(code))]
         return []
+
+    def pipe(self):
+        return _FakePipe(self)
+
+
+class _FakePipe:
+    """模拟 rd.pipe()：单条返回 dict、多条返回 [key, value] 对（与真实 pyd 一致）。"""
+
+    def __init__(self, rd: FakeRD) -> None:
+        self._rd = rd
+        self._calls = []
+
+    def mget(self, table, code, query):
+        self._calls.append((table, code, query))
+        return self
+
+    def do(self):
+        out = []
+        for table, code, query in self._calls:
+            records = list(self._rd.vals(table, code, query))
+            if len(records) == 1:
+                out.append(dict(records[0]))
+            else:
+                out.append(
+                    [
+                        [f"{table}:{code}:{r['date']}", dict(r)]
+                        for r in records
+                    ]
+                )
+        return out
 
 
 def _daily_row(day: int, close: float, **overrides) -> dict:
@@ -432,7 +484,9 @@ def test_auth_auto_start_flow(monkeypatch) -> None:
     class FakeModule:
         rd = FakeRD()
 
-    provider = StockDBProvider(config={"cache_dir": None, "sdk_dir": None})
+    provider = StockDBProvider(
+        config={"cache_dir": None, "sdk_dir": None, "use_light_client": False}
+    )
     provider._port_open = lambda *args, **kwargs: False
     provider._start_server = lambda: started.append(True)
     provider._wait_port = lambda *args, **kwargs: True

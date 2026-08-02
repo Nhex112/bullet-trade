@@ -17,9 +17,11 @@ import bisect
 import importlib
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import date as Date
 from datetime import datetime
@@ -90,6 +92,25 @@ class StockDBProvider(DataProvider):
                 os.getenv("STOCKDB_MINUTE_DAILY_FALLBACK", "true"),
             )
         )
+        self._use_light_client = self._parse_bool(
+            self.config.get(
+                "use_light_client",
+                os.getenv("STOCKDB_USE_LIGHT_CLIENT", "true"),
+            )
+        )
+        self._auto_heal = self._parse_bool(
+            self.config.get("auto_heal", os.getenv("STOCKDB_AUTO_HEAL", "true"))
+        )
+        try:
+            self._heal_threshold = max(
+                int(self.config.get("heal_threshold") or os.getenv("STOCKDB_HEAL_THRESHOLD") or 3),
+                1,
+            )
+        except (TypeError, ValueError):
+            self._heal_threshold = 3
+        self._failure_streak = 0
+        self._healing = False
+        self._heal_lock = threading.Lock()
         self._exe: Optional[str] = self.config.get("exe") or os.getenv("STOCKDB_EXE")
         self._sdk_dir: Optional[str] = self.config.get("sdk_dir") or os.getenv(
             "STOCKDB_SDK_DIR"
@@ -138,15 +159,29 @@ class StockDBProvider(DataProvider):
     @staticmethod
     def _detect_sdk_dir() -> Optional[str]:
         """自动探测仓库同级 stockdb/pybao 目录。"""
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_roots = StockDBProvider._repo_roots()
         candidates = [
-            repo_root.parent / "stockdb" / "pybao",
-            repo_root / "stockdb" / "pybao",
+            root.parent / "stockdb" / "pybao"
+            for root in repo_roots
+        ] + [
+            root / "stockdb" / "pybao"
+            for root in repo_roots
         ]
         for candidate in candidates:
             if (candidate / "stock_sdk.py").exists():
                 return str(candidate)
         return None
+
+    @staticmethod
+    def _repo_roots() -> List[Path]:
+        """stockdb.py 位于 <repo>/bullet_trade/data/providers/，向上 2~4 层取候选仓库根。"""
+        here = Path(__file__).resolve()
+        roots: List[Path] = []
+        for level in (4, 3, 2):
+            candidate = here.parents[level - 1] if len(here.parents) >= level else None
+            if candidate is not None and candidate not in roots:
+                roots.append(candidate)
+        return roots
 
     @staticmethod
     def jq_to_stockdb(security: str) -> str:
@@ -252,9 +287,9 @@ class StockDBProvider(DataProvider):
         env_exe = os.getenv("STOCKDB_EXE")
         if env_exe:
             candidates.append(env_exe)
-        repo_root = Path(__file__).resolve().parents[2]
-        candidates.append(str(repo_root.parent / "stockdb" / "stockdb.exe"))
-        candidates.append(str(repo_root / "stockdb" / "stockdb.exe"))
+        for repo_root in self._repo_roots():
+            candidates.append(str(repo_root.parent / "stockdb" / "stockdb.exe"))
+            candidates.append(str(repo_root / "stockdb" / "stockdb.exe"))
         for candidate in candidates:
             if candidate and Path(candidate).exists():
                 return candidate
@@ -290,6 +325,15 @@ class StockDBProvider(DataProvider):
             return self._sdk
         if self._sdk_dir and str(self._sdk_dir) not in sys.path:
             sys.path.insert(0, str(self._sdk_dir))
+        if self._use_light_client:
+            try:
+                self._sdk = importlib.import_module("stockdb")
+            except Exception as exc:
+                raise RuntimeError(
+                    "无法导入 stockdb 底层模块。请确认 STOCKDB_SDK_DIR 指向 "
+                    "stockdb/pybao 目录。原始错误: " + str(exc)
+                ) from exc
+            return self._sdk
         try:
             self._sdk = importlib.import_module("stock_sdk")
         except Exception as exc:
@@ -305,6 +349,86 @@ class StockDBProvider(DataProvider):
         if self._rd is None:
             self.auth()
         return self._rd
+
+    def _note_query_failure(self, exc: Exception) -> None:
+        """记录连续查询失败；达到阈值后自动重启服务并重建连接。"""
+        if not self._auto_heal or self._healing:
+            return
+        self._failure_streak += 1
+        if self._failure_streak < self._heal_threshold:
+            return
+        with self._heal_lock:
+            if self._healing:
+                return
+            self._healing = True
+            self._failure_streak = 0
+            try:
+                logger.warning(
+                    "stockdb 连续 %d 次查询失败（%s），尝试自动重启服务",
+                    self._heal_threshold,
+                    exc,
+                )
+                self._heal_server()
+            except Exception as heal_exc:
+                logger.error("stockdb 自动重启失败: %s", heal_exc)
+            finally:
+                self._healing = False
+
+    @staticmethod
+    def _find_port_pid(port: int) -> Optional[int]:
+        """通过 netstat 找到监听指定端口的进程 PID。"""
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+        except Exception:
+            return None
+        for line in out.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                if parts and parts[-1].isdigit():
+                    return int(parts[-1])
+        return None
+
+    def _rebuild_client(self) -> None:
+        """服务重启后重建连接（light 模式无预加载开销）。"""
+        if self._use_light_client:
+            module = importlib.import_module("stockdb")
+            raw = module.init(self._host, self._port)
+            from .stockdb_light import LightStockDBClient
+
+            self._rd = LightStockDBClient(raw)
+        else:
+            module = importlib.import_module("stock_sdk")
+            import stockdb as raw_module
+
+            raw = raw_module.init(self._host, self._port)
+            gp = module.StockDBClient(host=self._host, port=self._port)
+            self._rd = module.StockDBClientProxy(raw, gp)
+
+    def _heal_server(self) -> None:
+        """终止旧服务进程 -> 重新拉起 -> 等待端口 -> 重建客户端。"""
+        port_pid = self._find_port_pid(self._port)
+        if port_pid:
+            try:
+                os.kill(port_pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if not self._port_open(self._host, self._port, timeout=0.5):
+                    break
+                time.sleep(0.3)
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.terminate()
+        self._start_server()
+        if not self._wait_port(self._host, self._port):
+            raise RuntimeError("stockdb 自动重启失败：端口未就绪")
+        self._rebuild_client()
+        logger.info("stockdb 服务已自动重启并重连成功")
 
     def auth(
         self,
@@ -334,10 +458,15 @@ class StockDBProvider(DataProvider):
                     "或设置 STOCKDB_AUTO_START=true 让 provider 自动拉起"
                 )
         module = self._import_sdk()
-        rd = getattr(module, "rd", None)
-        if rd is None:
-            raise RuntimeError("stock_sdk 模块未暴露 rd 客户端对象")
-        self._rd = rd
+        if self._use_light_client:
+            from .stockdb_light import LightStockDBClient
+
+            self._rd = LightStockDBClient(module.rd)
+        else:
+            rd = getattr(module, "rd", None)
+            if rd is None:
+                raise RuntimeError("stock_sdk 模块未暴露 rd 客户端对象")
+            self._rd = rd
 
     # ------------------------------------------------------------------
     # 复权因子
@@ -384,6 +513,7 @@ class StockDBProvider(DataProvider):
             }
         except Exception as exc:
             logger.warning("读取 stockdb 复权因子失败 [%s]: %s", code6, exc)
+            self._note_query_failure(exc)
             return {}
         if factor_map:
             self._factor_cache[code6] = factor_map
@@ -520,6 +650,7 @@ class StockDBProvider(DataProvider):
             records = self._rd.get_data(**kwargs)
         except Exception as exc:
             logger.warning("stockdb get_data 失败 [%s]: %s", code6, exc)
+            self._note_query_failure(exc)
             return []
         if records is None:
             return []
@@ -778,6 +909,7 @@ class StockDBProvider(DataProvider):
                 )
             except Exception as exc:
                 logger.warning("读取锚点股票交易日失败 [%s]: %s", code, exc)
+                self._note_query_failure(exc)
                 continue
             for row in records or []:
                 if isinstance(row, (list, tuple)) and row:
@@ -854,6 +986,7 @@ class StockDBProvider(DataProvider):
             records = list(self._rd.vals(_TABLE_DAILY, "*", latest8))
         except Exception as exc:
             logger.warning("读取 stockdb 最新交易日证券快照失败: %s", exc)
+            self._note_query_failure(exc)
             return {}
         names: Dict[str, str] = {}
         for record in records:

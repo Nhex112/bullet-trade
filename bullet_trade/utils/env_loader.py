@@ -209,6 +209,8 @@ def get_data_provider_config() -> dict:
             "exe": get_env("STOCKDB_EXE"),
             "timeout": get_env_float("STOCKDB_TIMEOUT", 15.0),
             "minute_daily_fallback": get_env_bool("STOCKDB_MINUTE_DAILY_FALLBACK", True),
+            "use_light_client": get_env_bool("STOCKDB_USE_LIGHT_CLIENT", True),
+            "heal_threshold": get_env_int("STOCKDB_HEAL_THRESHOLD", 3),
             "cache_dir": cache_dir_for("stockdb"),
         },
     }
