@@ -208,6 +208,7 @@ def get_data_provider_config() -> dict:
             "auto_start": get_env_bool("STOCKDB_AUTO_START", True),
             "exe": get_env("STOCKDB_EXE"),
             "timeout": get_env_float("STOCKDB_TIMEOUT", 15.0),
+            "minute_daily_fallback": get_env_bool("STOCKDB_MINUTE_DAILY_FALLBACK", True),
             "cache_dir": cache_dir_for("stockdb"),
         },
     }

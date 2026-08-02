@@ -103,7 +103,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `auth` | 自动拉起 + 健康检查 | 本地服务 | PASS | 服务未运行时自动启动 stockdb.exe 并轮询 7899 端口 | 可用 STOCKDB_AUTO_START=false 关闭 |
 | `get_price` | 日线未复权长窗口 | JQData | PARTIAL | 本地数据自洽：000001.XSHE/600519.XSHG/510050.XSHG 日线正常返回；与 JQData 数值对账因账号权限未执行 | 单元测试覆盖 panel/长表/字段映射 |
-| `get_price` | 1m/5m 分钟线 | 本地数据 | PASS | 日内 14 位时间戳对齐，数据形态与 SDK 一致 | 分钟线长历史以本地同步为准 |
+| `get_price` | 1m/5m 分钟线 | 本地数据 | LIMIT | 日内 14 位时间戳对齐，数据形态与 SDK 一致 | 分钟线覆盖不完整（部分历史日期无 1m）；日频回测的 count=1 探测回退当日日线近似 |
 | `get_price(fq="pre")` | 日线前复权 | JQData | PARTIAL | 复权因子在内存计算，跨除权日样例闭环正确；对账待补 | 与 SDK 前复权公式一致（raw * cum / cum_latest） |
 | `pre_factor_ref_date` | 动态前复权日线 | JQData | PARTIAL | 以参考日因子锚定，样例计算正确 | 无复权因子且显式要求参考日时报 NotImplementedError |
 | `get_trade_days` | 交易日历 | JQData | PARTIAL | 锚点并集日历与回测 81 个交易日一致；与 JQData 集合对账待补 | 支持 start/end/count，经 CacheManager 缓存 |

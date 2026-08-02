@@ -84,6 +84,12 @@ class StockDBProvider(DataProvider):
         self._auto_start = self._parse_bool(
             self.config.get("auto_start", os.getenv("STOCKDB_AUTO_START", "true"))
         )
+        self._minute_daily_fallback = self._parse_bool(
+            self.config.get(
+                "minute_daily_fallback",
+                os.getenv("STOCKDB_MINUTE_DAILY_FALLBACK", "true"),
+            )
+        )
         self._exe: Optional[str] = self.config.get("exe") or os.getenv("STOCKDB_EXE")
         self._sdk_dir: Optional[str] = self.config.get("sdk_dir") or os.getenv(
             "STOCKDB_SDK_DIR"
@@ -94,6 +100,7 @@ class StockDBProvider(DataProvider):
         self._rd: Optional[Any] = self.config.get("rd")
         self._sdk: Optional[Any] = self.config.get("sdk_module")
         self._proc: Optional[subprocess.Popen] = None
+        self._factor_cache: Dict[str, Dict[int, float]] = {}
         cache_dir = self.config.get("cache_dir")
         use_env_cache = "cache_dir" not in self.config
         try:
@@ -365,14 +372,20 @@ class StockDBProvider(DataProvider):
         return records
 
     def _factor_map(self, code6: str) -> Dict[int, float]:
+        cached = self._factor_cache.get(code6)
+        if cached is not None:
+            return cached
         try:
-            return {
+            factor_map = {
                 date_int: float(rec.get("cum") or 1.0)
                 for date_int, rec in self._factor_records(code6)
             }
         except Exception as exc:
             logger.warning("读取 stockdb 复权因子失败 [%s]: %s", code6, exc)
             return {}
+        if factor_map:
+            self._factor_cache[code6] = factor_map
+        return factor_map
 
     @staticmethod
     def _factor_series(factor_map: Dict[int, float], date_ints: List[int]) -> List[float]:
@@ -581,6 +594,28 @@ class StockDBProvider(DataProvider):
                 frequency=frequency_norm,
                 count=count,
             )
+            if (
+                not records
+                and is_minute
+                and count is not None
+                and count == 1
+                and self._minute_daily_fallback
+                and end_q is not None
+            ):
+                # stockdb 分钟线覆盖不完整；对 count=1 的“当前行情探测”
+                # 回退到当日日线近似（日频回测的引擎 current_data 场景）。
+                logger.debug(
+                    "stockdb 分钟线在 %s 无数据，回退到当日日线近似（count=1 探测）: %s",
+                    str(end_q)[:8],
+                    sec,
+                )
+                records = self._fetch_price_for_security(
+                    code6,
+                    start_q=self._to_ymd(end_q),
+                    end_q=self._to_ymd(end_q),
+                    frequency="1d",
+                    count=1,
+                )
             if not records:
                 continue
             frame = self._records_to_frame(

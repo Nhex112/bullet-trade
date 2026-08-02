@@ -339,6 +339,57 @@ def test_get_price_minute_shape() -> None:
     assert df["close"].tolist() == [10.05, 10.15]
 
 
+def test_get_price_minute_count1_falls_back_to_daily() -> None:
+    rd = FakeRD(
+        daily={
+            "600000": [
+                _daily_row(20240103, 10.0),
+                _daily_row(20240102, 9.8),
+            ]
+        }
+    )
+    provider = _provider(rd)
+    df = provider.get_price(
+        "600000.XSHG",
+        end_date="2024-01-03 10:00:00",
+        count=1,
+        frequency="minute",
+        fields=["open", "close"],
+        fq="none",
+    )
+    # 分钟线无数据时，count=1 的行情探测回退到当日日线
+    assert len(df) == 1
+    assert df.index[0].date() == pd.Timestamp("2024-01-03").date()
+    assert df["close"].tolist() == [10.0]
+
+    # count>1 的分钟级取数不伪造数据，仍返回空
+    empty = provider.get_price(
+        "600000.XSHG",
+        end_date="2024-01-03 10:00:00",
+        count=5,
+        frequency="minute",
+        fields=["close"],
+        fq="none",
+    )
+    assert empty.empty
+
+
+def test_get_price_minute_fallback_can_be_disabled() -> None:
+    rd = FakeRD(daily={"600000": [_daily_row(20240103, 10.0)]})
+    provider = StockDBProvider(
+        config={"rd": rd, "cache_dir": None, "minute_daily_fallback": False}
+    )
+    df = provider.get_price(
+        "600000.XSHG",
+        end_date="2024-01-03 10:00:00",
+        count=1,
+        frequency="minute",
+        fields=["close"],
+        fq="none",
+    )
+    assert df.empty
+
+
 def test_get_trade_days_union_and_semantics() -> None:
     rd = FakeRD(
         daily={
