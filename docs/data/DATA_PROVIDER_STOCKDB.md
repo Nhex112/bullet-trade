@@ -79,3 +79,8 @@ BT_BACKTEST_DATA_SESSION_PRICE_BLOCKS=true
 
 详见 [DATA_PROVIDER_ACCEPTANCE.md](DATA_PROVIDER_ACCEPTANCE.md) 的 StockDB 打样结果；
 与 JQData 的数值对账因当前 JQData 账号未开通 SDK 权限而标记 PARTIAL/BLOCKED，待权限恢复后补充。
+
+## 相关文档
+
+- [接入实现记录（提交历史与性能演进）](STOCKDB_IMPLEMENTATION_LOG.md)
+- [后续优化 TODO-list（P2/P3 按需实施）](STOCKDB_TODO.md)
