@@ -210,3 +210,9 @@ logs/*
 # Big QMT helper runtime state
 artifacts/
 helpers/bt_big_qmt_order_tags.json
+
+# 本地量化研究：回测产物与本地缓存（不纳入版本管理）
+backtest_results/
+.cache/
+# 误展开 "~" 时可能生成的字面量目录
+/~/
