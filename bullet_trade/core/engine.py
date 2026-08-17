@@ -2029,8 +2029,12 @@ class BacktestEngine:
                 min_trade_size = 100  # A股一手
                 min_order_amount = 100
 
-                # 资金检查价格：若存在限价/保护价则按限价锁资，否则按撮合价
-                fund_check_price = limit_price if limit_price is not None else trade_price
+                # 资金检查价格：市价单按实际成交价/撮合价锁资（贴近聚宽）；
+                # 限价单仍按限价锁资，避免超出委托价成交
+                if isinstance(style_obj, MarketOrderStyle):
+                    fund_check_price = trade_price
+                else:
+                    fund_check_price = limit_price if limit_price is not None else trade_price
                 try:
                     extra = getattr(order, "extra", None)
                     if extra is None:

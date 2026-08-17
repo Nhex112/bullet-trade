@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 from datetime import date as Date
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -628,6 +628,8 @@ class StockDBProvider(DataProvider):
                 out["factor"] = 1.0
         return out
 
+    _MINUTE_CHUNK_DAYS = 20  # 分钟线宽区间查询按块拉取，避免服务端结果截断
+
     def _fetch_price_for_security(
         self,
         code6: str,
@@ -637,15 +639,57 @@ class StockDBProvider(DataProvider):
         frequency: str,
         count: Optional[int],
     ) -> List[Dict[str, Any]]:
-        kwargs: Dict[str, Any] = {
-            "code": code6,
-            "frequency": frequency,
-            "fq": None,
-        }
+        is_minute = frequency in ("1m", "5m", "15m", "30m", "60m")
+        # 归一化为 14 位时间戳（零点日期会转成 8 位）
+        norm_start = start_q + "000000" if start_q and len(start_q) == 8 else start_q
+        norm_end = end_q + "235959" if end_q and len(end_q) == 8 else end_q
+        if (
+            is_minute
+            and count is None
+            and norm_start
+            and norm_end
+            and int(norm_end[:8]) - int(norm_start[:8]) > self._MINUTE_CHUNK_DAYS
+        ):
+            # stockdb 服务端对单次大范围查询有返回行数上限（实测约 2.8 万行，
+            # 且超限时静默截断不报错），分钟级宽区间必须分块拉取再合并，
+            # 否则回测 session 预取的价格块会被截断，后续取价全部取到过期数据。
+            records: List[Dict[str, Any]] = []
+            chunk_start = int(norm_start)
+            end_int = int(norm_end)
+            while chunk_start <= end_int:
+                chunk_end = min(
+                    self._add_days_yyyymmddhhmmss(chunk_start, self._MINUTE_CHUNK_DAYS),
+                    end_int,
+                )
+                part = self._fetch_price_range(
+                    code6,
+                    start_q=str(chunk_start),
+                    end_q=str(chunk_end),
+                    frequency=frequency,
+                )
+                records.extend(part)
+                chunk_start = self._add_days_yyyymmddhhmmss(chunk_start, self._MINUTE_CHUNK_DAYS + 1)
+            return records
+
         if count is not None:
-            kwargs.update({"start": start_q, "end": end_q, "desc": True, "limit": count})
+            kwargs = {
+                "code": code6,
+                "frequency": frequency,
+                "fq": None,
+                "start": start_q,
+                "end": end_q,
+                "desc": True,
+                "limit": count,
+            }
         else:
-            kwargs.update({"start": start_q, "end": end_q, "desc": False})
+            kwargs = {
+                "code": code6,
+                "frequency": frequency,
+                "fq": None,
+                "start": start_q,
+                "end": end_q,
+                "desc": False,
+            }
         try:
             records = self._rd.get_data(**kwargs)
         except Exception as exc:
@@ -659,6 +703,34 @@ class StockDBProvider(DataProvider):
         if count is not None:
             records = list(reversed(records))
         return records
+
+    def _fetch_price_range(
+        self, code6: str, *, start_q: str, end_q: str, frequency: str
+    ) -> List[Dict[str, Any]]:
+        try:
+            records = self._rd.get_data(
+                code=code6,
+                frequency=frequency,
+                fq=None,
+                start=start_q,
+                end=end_q,
+                desc=False,
+            )
+        except Exception as exc:
+            logger.warning("stockdb get_data 失败 [%s]: %s", code6, exc)
+            self._note_query_failure(exc)
+            return []
+        if records is None:
+            return []
+        if not isinstance(records, list):
+            records = list(records)
+        return records
+
+    @staticmethod
+    def _add_days_yyyymmddhhmmss(ts_int: int, days: int) -> int:
+        base = datetime.strptime(str(ts_int)[:8], "%Y%m%d")
+        new_date = base + timedelta(days=days)
+        return int(new_date.strftime("%Y%m%d") + str(ts_int)[8:])
 
     @staticmethod
     def _bounded_start_for_count(
@@ -752,9 +824,12 @@ class StockDBProvider(DataProvider):
             if manual_fq and fq_norm in ("pre", "qfq"):
                 factor_ref = self._resolve_factor_ref(factor_map, pre_factor_ref_date)
                 if not factor_map and pre_factor_ref_date is not None:
-                    raise NotImplementedError(
-                        "stockdb 无该标的复权因子，无法执行 pre_factor_ref_date 动态前复权: "
-                        + sec
+                    # 空因子表语义上等价于"该标的历史无分红/拆分"（因子恒为 1.0），
+                    # 例如无分红的 ETF（518880/159915 等）。不能因数据为空而拒绝
+                    # 动态前复权查询，否则回测引擎的 current_data 探测会判定
+                    # "无法获取行情"并拒单。
+                    logger.debug(
+                        "stockdb 无 %s 复权因子记录，按因子恒为 1.0 处理（无分红/拆分）", sec
                     )
             records = self._fetch_price_for_security(
                 code6,
