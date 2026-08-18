@@ -2035,6 +2035,14 @@ class BacktestEngine:
                     fund_check_price = trade_price
                 else:
                     fund_check_price = limit_price if limit_price is not None else trade_price
+                # 聚宽语义：市价单计算可买上限时按滑点前基准价折算（与目标股数
+                # 的换算基准一致），滑点导致的超额成交允许现金小幅为负；
+                # 限价单仍按锁资价折算
+                affordability_price = (
+                    current_price
+                    if isinstance(style_obj, MarketOrderStyle)
+                    else fund_check_price
+                )
                 try:
                     extra = getattr(order, "extra", None)
                     if extra is None:
@@ -2068,8 +2076,7 @@ class BacktestEngine:
                         self.context.portfolio.available_cash - self.context.portfolio.locked_cash,
                     )
                     effective_cash = max(0.0, available_for_buy - min_commission)
-                    denom = fund_check_price * (1.0 + open_comm_rate + open_tax_rate)
-                    aval_amount = int(effective_cash // denom) if denom > 0 else 0
+                    aval_amount = int(effective_cash // affordability_price) if affordability_price > 0 else 0
                     if aval_amount <= 0:
                         log.warning(f"{order.security} 资金不足，最小费用后可用现金为 {effective_cash:.2f}")
                         order.status = OrderStatus.rejected
@@ -2129,7 +2136,13 @@ class BacktestEngine:
                 if is_buy:
                     # 委托时锁定资金（含费用）
                     self.context.portfolio.locked_cash += total_cost
-                    if total_cost > (self.context.portfolio.available_cash):
+                    # 聚宽兼容：市价 order_target_value 满仓买入时，
+                    # 滑点导致的额外成本允许现金小幅为负（容差=滑点比例×金额+佣金）
+                    shortfall = total_cost - self.context.portfolio.available_cash
+                    tolerance = 0.0
+                    if isinstance(style_obj, MarketOrderStyle):
+                        tolerance = abs(trade_price - current_price) * trade_amount + (commission + tax)
+                    if shortfall > tolerance:
                         # 双重保障：若仍不足则拒绝并回滚锁定
                         log.warning(
                             f"{order.security} 资金不足: 需要 {total_cost:.2f}, 可用 {self.context.portfolio.available_cash:.2f}"
